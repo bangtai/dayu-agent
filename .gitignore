@@ -24,3 +24,5 @@ htmlcov/
 .vscode/*
 .playwright-mcp/
 uv.lock
+# 本机环境激活脚本（含 .bashrc API key 提取，不入库）
+dayu-env.sh
