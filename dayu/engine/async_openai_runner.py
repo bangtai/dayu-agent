@@ -466,6 +466,43 @@ def _classify_retried_final_error_type(status: int) -> str:
     return "rate_limit_exceeded" if status == 429 else "server_error"
 
 
+# OpenCode Relay（opencode.ai Zen/Go）会话亲和头常量。
+# OpenCode 依赖一致的 x-opencode-session 值做后端亲和与缓存优化；
+# 自 2026-09-06 起缺失该头的请求可能直接报错。
+_OPENCODE_SESSION_HEADER = "x-opencode-session"
+_OPENCODE_ENDPOINT_MARKER = "opencode.ai"
+
+
+def _inject_opencode_session_header(
+    headers: Dict[str, str],
+    endpoint_url: str,
+) -> Dict[str, str]:
+    """为 OpenCode Relay 端点补充会话亲和请求头。
+
+    当 ``endpoint_url`` 指向 OpenCode Relay（含 ``opencode.ai`` 主机）时，
+    注入 ``x-opencode-session`` 头：值取当前 Runner 实例级生成的稳定会话
+    ID，同一 Runner（对应同一对话/会话）的全部请求保持一致，不同 Runner
+    使用不同 ID；调用方在模型配置里显式提供的同名请求头优先保留，不做
+    覆盖。非 OpenCode 端点原样返回，不注入任何头。
+
+    Args:
+        headers: 模型配置原始请求头（含 Authorization）。
+        endpoint_url: OpenAI 兼容端点 URL。
+
+    Returns:
+        合并后的请求头字典新副本；不修改入参。
+
+    Raises:
+        无。
+    """
+
+    merged = dict(headers)
+    if _OPENCODE_ENDPOINT_MARKER not in endpoint_url:
+        return merged
+    merged.setdefault(_OPENCODE_SESSION_HEADER, f"opencode-session-{uuid.uuid4().hex}")
+    return merged
+
+
 @dataclass
 class AsyncOpenAIRunnerRunningConfig:
     """
@@ -557,7 +594,7 @@ class AsyncOpenAIRunner:
         self.model = model
         Log.verbose(f"初始化 AsyncOpenAIRunner: model={model}, endpoint_url={endpoint_url}", module=MODULE)
         self.name = name or model  # 默认使用 model 作为 name
-        self.headers = headers
+        self.headers = _inject_opencode_session_header(headers, endpoint_url)
         self.temperature = temperature
         self.timeout = timeout
         self.max_retries = max_retries

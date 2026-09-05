@@ -580,3 +580,138 @@ async def test_run_tool_call_timeout_marks_soft_timeout_even_if_thread_finishes_
     assert side_effects == []
 
     assert _wait_until(lambda: side_effects == ["demo_tool:{'k': 'v'}"], timeout_seconds=1.0)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode Relay x-opencode-session 会话亲和头
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_session_header_injected_for_opencode_endpoint() -> None:
+    """验证 OpenCode Relay 端点会注入 x-opencode-session 头。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    runner = aor.AsyncOpenAIRunner(
+        endpoint_url="https://opencode.ai/zen/go/v1/chat/completions",
+        model="opencode-go-mimo-thinking",
+        headers={"Authorization": "Bearer fake"},
+    )
+    session_value = runner.headers.get(aor._OPENCODE_SESSION_HEADER)
+    assert session_value is not None
+    assert session_value.startswith("opencode-session-")
+    assert runner.headers["Authorization"] == "Bearer fake"
+
+
+def test_opencode_session_header_stable_per_runner_instance() -> None:
+    """验证同一 Runner 会话 ID 稳定、不同 Runner 会话 ID 不同。
+
+    Runner 实例对应一次对话/会话，其会话 ID 需在实例生命周期内稳定，
+    且不同会话之间不重复，满足 OpenCode 每会话一个稳定 ID 的要求。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    def _build_runner() -> aor.AsyncOpenAIRunner:
+        if aor.aiohttp is None:
+            aor.aiohttp = object()
+        return aor.AsyncOpenAIRunner(
+            endpoint_url="https://opencode.ai/zen/go/v1/chat/completions",
+            model="opencode-go-mimo-thinking",
+            headers={},
+        )
+
+    first = _build_runner()
+    second = _build_runner()
+
+    first_value = first.headers[aor._OPENCODE_SESSION_HEADER]
+    second_value = second.headers[aor._OPENCODE_SESSION_HEADER]
+
+    # 同一 Runner 实例生命周期内保持稳定（多次读取同一值）
+    assert first.headers[aor._OPENCODE_SESSION_HEADER] == first_value
+    # 不同 Runner（不同会话）使用不同的会话 ID
+    assert first_value != second_value
+
+
+def test_opencode_session_header_absent_for_non_opencode_endpoint() -> None:
+    """验证非 OpenCode 端点（如 DeepSeek 官方 API）不注入会话头。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    if aor.aiohttp is None:
+        aor.aiohttp = object()
+    runner = aor.AsyncOpenAIRunner(
+        endpoint_url="https://api.deepseek.com/chat/completions",
+        model="deepseek-v4-flash",
+        headers={"Authorization": "Bearer fake"},
+    )
+    assert aor._OPENCODE_SESSION_HEADER not in runner.headers
+
+
+def test_opencode_session_header_preserves_explicit_config_value() -> None:
+    """验证模型配置里显式提供的 x-opencode-session 优先保留。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    if aor.aiohttp is None:
+        aor.aiohttp = object()
+    runner = aor.AsyncOpenAIRunner(
+        endpoint_url="https://opencode.ai/zen/go/v1/chat/completions",
+        model="opencode-go-mimo-thinking",
+        headers={aor._OPENCODE_SESSION_HEADER: "caller-pinned-session"},
+    )
+    assert runner.headers[aor._OPENCODE_SESSION_HEADER] == "caller-pinned-session"
+
+
+def test_inject_opencode_session_header_does_not_mutate_input() -> None:
+    """验证辅助函数不修改调用方传入的原始请求头字典。
+
+    Args:
+        无。
+
+    Returns:
+        无。
+
+    Raises:
+        AssertionError: 断言失败时抛出。
+    """
+
+    original = {"Authorization": "Bearer fake"}
+    result = aor._inject_opencode_session_header(
+        original,
+        "https://opencode.ai/zen/go/v1/chat/completions",
+    )
+    assert original == {"Authorization": "Bearer fake"}
+    assert result is not original
+    assert aor._OPENCODE_SESSION_HEADER in result
