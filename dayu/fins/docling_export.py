@@ -57,12 +57,27 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _is_docling_disabled() -> bool:
-    """检查是否强制禁用 Docling。"""
-    return _env_bool("DAYU_DOCLING_DISABLE", False)
+    """检查是否禁用 Docling（默认禁用，一律走 pypdf 降级）。
+
+    本机 1.6GB 内存实测：Docling 单份财报需 900MB~1GB 常驻、耗时 5~19 小时，
+    且会被内核 global OOM 杀掉。故自 2026-09-16 起默认禁用 Docling。
+    只有在显式设置 ``DAYU_DOCLING_FORCE=true`` 时才启用 Docling（供内存充裕
+    的机器使用；本机不要设）。
+    """
+    if _env_bool("DAYU_DOCLING_FORCE", False):
+        return False
+    return _env_bool("DAYU_DOCLING_DISABLE", True)
 
 
 def _check_low_memory() -> bool:
-    """检查是否为低内存环境（< 2GB 可用 RAM）。"""
+    """检查是否为低内存环境（< 2GB 可用 RAM）。
+
+    ``DAYU_DOCLING_FORCE=true`` 可跳过该检测强制走 Docling：实测 1.6GB 内存
+    的机器跑 Docling fast 模式（46 页财报）峰值 RSS ≈1GB、耗时 ≈15 分钟，
+    能跑通；但默认 2GB 阈值会让这类机器永远降级为 pypdf。
+    """
+    if _env_bool("DAYU_DOCLING_FORCE", False):
+        return False
     try:
         with open("/proc/meminfo") as f:
             for line in f:
