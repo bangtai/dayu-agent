@@ -60,6 +60,8 @@ _ACCELERATOR_DEVICE_NAMES = frozenset(
     {_CUDA_DEVICE_NAME, _MPS_DEVICE_NAME, _XPU_DEVICE_NAME}
 )
 _DOCLING_PARSE_BACKEND_NAME = "docling-parse"
+# 低内存模式下页面图像缩放系数：位图内存按平方下降，0.5 即降到四分之一。
+_LOW_MEMORY_IMAGE_SCALE = 0.5
 _PYPDFIUM2_BACKEND_NAME = "pypdfium2"
 _SUPPORTED_DOCLING_BACKENDS = frozenset({_DOCLING_PARSE_BACKEND_NAME, _PYPDFIUM2_BACKEND_NAME})
 _TABLE_MODE_ACCURATE = "accurate"
@@ -393,6 +395,26 @@ def build_docling_pdf_converter(
     )
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """读取布尔型环境变量；未设置或为空时返回 ``default``。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_positive_int(name: str, default: int | None) -> int | None:
+    """读取正整数型环境变量；未设置或非法时返回 ``default``。"""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def build_docling_pdf_pipeline_options(
     *,
     do_ocr: bool = True,
@@ -443,9 +465,35 @@ def build_docling_pdf_pipeline_options(
     pipeline_options = cast(_DoclingPdfPipelineOptionsProtocol, PdfPipelineOptions())
     pipeline_options.do_ocr = do_ocr
     pipeline_options.do_table_structure = do_table_structure
-    pipeline_options.accelerator_options = AcceleratorOptions(
+    accelerator_options = AcceleratorOptions(
         device=AcceleratorDevice(normalized_device_name)
     )
+
+    # 低内存模式：把批大小与推理线程数降到 1，显著压低峰值 RSS（代价是变慢）。
+    # 默认行为完全不变；1.6GB 小内存机器处理上百页财报时必须开启。
+    low_memory = _env_flag("DAYU_DOCLING_LOW_MEM", default=False)
+    batch_size = _env_positive_int("DAYU_DOCLING_BATCH_SIZE", 1 if low_memory else None)
+    thread_count = _env_positive_int(
+        "DAYU_DOCLING_NUM_THREADS", 1 if low_memory else None
+    )
+    if batch_size is not None:
+        for option_name in ("layout_batch_size", "table_batch_size", "ocr_batch_size"):
+            if hasattr(pipeline_options, option_name):
+                setattr(pipeline_options, option_name, batch_size)
+    if thread_count is not None and hasattr(accelerator_options, "num_threads"):
+        accelerator_options.num_threads = thread_count
+
+    # 低内存模式再加一层：不渲染页面/图片位图（导出产物只用文本与表格），
+    # 并把页面图像缩放减半。位图是上百页财报里最容易把峰值 RSS 顶上去的部分。
+    # 默认行为完全不变。
+    if low_memory:
+        for image_flag_name in ("generate_page_images", "generate_picture_images"):
+            if hasattr(pipeline_options, image_flag_name):
+                setattr(pipeline_options, image_flag_name, False)
+        if hasattr(pipeline_options, "images_scale"):
+            pipeline_options.images_scale = _LOW_MEMORY_IMAGE_SCALE
+
+    pipeline_options.accelerator_options = accelerator_options
 
     if do_table_structure:
         table_structure_options = cast(
